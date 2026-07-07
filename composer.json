@@ -1,0 +1,88 @@
+{
+    "name": "cboxdk/laravel-telemetry-store",
+    "description": "Native ClickHouse OTEL store for cboxdk/laravel-telemetry: PHP OTLP ingest and a ClickHouse-backed read driver for cboxdk/laravel-telemetry-ui — one SQL store instead of Tempo+Loki+Mimir.",
+    "keywords": [
+        "cbox",
+        "laravel",
+        "telemetry",
+        "observability",
+        "clickhouse",
+        "otel",
+        "otlp",
+        "opentelemetry"
+    ],
+    "homepage": "https://github.com/cboxdk/laravel-telemetry-store",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Sylvester Damgaard",
+            "email": "sn@cbox.dk",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.3|^8.4|^8.5",
+        "cboxdk/laravel-telemetry-ui": "^0.4.0",
+        "illuminate/contracts": "^12.0|^13.0",
+        "illuminate/http": "^12.0|^13.0",
+        "illuminate/support": "^12.0|^13.0"
+    },
+    "require-dev": {
+        "larastan/larastan": "^3.0",
+        "laravel/pint": "^1.14",
+        "nunomaduro/collision": "^8.8",
+        "orchestra/testbench": "^10.0|^11.0",
+        "pestphp/pest": "^4.0",
+        "pestphp/pest-plugin-arch": "^4.0",
+        "pestphp/pest-plugin-laravel": "^4.0",
+        "phpstan/extension-installer": "^1.4",
+        "phpstan/phpstan-deprecation-rules": "^2.0",
+        "phpstan/phpstan-phpunit": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Cbox\\TelemetryStore\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Cbox\\TelemetryStore\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Cbox\\TelemetryStore\\TelemetryStoreServiceProvider"
+            ]
+        }
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../laravel-telemetry-ui",
+            "options": {
+                "symlink": true
+            }
+        }
+    ],
+    "scripts": {
+        "analyse": "vendor/bin/phpstan analyse --memory-limit=1G",
+        "format": "vendor/bin/pint",
+        "format:check": "vendor/bin/pint --test",
+        "test": "vendor/bin/pest",
+        "check": [
+            "@format:check",
+            "@analyse",
+            "@test"
+        ]
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "phpstan/extension-installer": true
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
