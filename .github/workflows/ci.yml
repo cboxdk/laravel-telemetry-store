@@ -48,8 +48,19 @@ jobs:
         working-directory: laravel-telemetry-store
         run: vendor/bin/phpstan --error-format=github --memory-limit=1G
 
-      # The tests/E2E suite is gated on a reachable ClickHouse on :18123 and
-      # skips here; run it locally against a live store. Unit + Feature run.
-      - name: Pest
+      # Start ClickHouse on :18123 so the tests/E2E suite runs (it gates on
+      # reachability). The override opens the default user to the runner.
+      - name: Start ClickHouse
+        run: |
+          docker run -d --name ch -p 18123:8123 --ulimit nofile=262144:262144 \
+            -v "$GITHUB_WORKSPACE/laravel-telemetry-store/.github/clickhouse/open.xml:/etc/clickhouse-server/users.d/open.xml:ro" \
+            clickhouse/clickhouse-server:24.8
+          for i in $(seq 1 60); do
+            if curl -sf "http://localhost:18123/?query=SELECT%201" >/dev/null; then echo "ClickHouse ready"; exit 0; fi
+            sleep 1
+          done
+          echo "ClickHouse did not become ready"; docker logs ch; exit 1
+
+      - name: Pest (unit, feature + E2E vs ClickHouse)
         working-directory: laravel-telemetry-store
         run: vendor/bin/pest --ci

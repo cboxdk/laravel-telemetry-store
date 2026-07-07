@@ -46,7 +46,10 @@ final class TelemetryStoreServiceProvider extends ServiceProvider
             );
         });
 
-        $this->app->singleton(StoreWriter::class, static fn (Application $app): StoreWriter => new ClickHouseWriter($app->make(Client::class)));
+        $this->app->singleton(StoreWriter::class, static fn (Application $app): StoreWriter => new ClickHouseWriter(
+            $app->make(Client::class),
+            (int) $app->make('config')->get('telemetry-store.ingest.max_rows_per_insert', 5000),
+        ));
     }
 
     public function boot(): void

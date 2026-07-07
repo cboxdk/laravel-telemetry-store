@@ -2,6 +2,15 @@
 
 All notable changes to `cboxdk/laravel-telemetry-store` are documented here.
 
+## v1.1.1
+
+### Added
+- Ingest chunks inserts at `ingest.max_rows_per_insert` (was unused) so an
+  oversized OTLP request can't balloon one insert body in memory.
+- CI now runs the `tests/E2E` suite against a ClickHouse service (was skipped).
+- Load/scale numbers in the deployment guide (~180–200k rows/s ingest,
+  single/low-double-digit-ms reads over 500k logs / 200k spans / 10k series).
+
 ## v1.1.0
 
 The metrics path now actually matches the dashboard, and everything is proven

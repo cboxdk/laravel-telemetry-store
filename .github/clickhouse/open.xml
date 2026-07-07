@@ -1,0 +1,12 @@
+<!-- CI only: open the default user to the runner (the image locks it to
+     localhost, which rejects host connections through the port mapping). Do NOT
+     use this in production — see docs/deployment.md. -->
+<clickhouse>
+    <users>
+        <default>
+            <password></password>
+            <networks replace="replace"><ip>::/0</ip></networks>
+            <access_management>1</access_management>
+        </default>
+    </users>
+</clickhouse>

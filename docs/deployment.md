@@ -43,9 +43,22 @@ per-table TTL from `telemetry-store.retention_days` (default 30); ClickHouse
 drops whole day-partitions, so retention is essentially free. Bump it and
 re-run, or `ALTER TABLE … MODIFY TTL` for an immediate change.
 
-Sizing: budget by ingested rows/day × retention. Metrics and logs dominate;
-traces are the largest per-row. Start with the defaults and watch
-`system.parts` / disk.
+Sizing: budget by ingested rows/day × retention. Start with the defaults and
+watch `system.parts` / disk. Columnar compression is generous — in a local
+load probe, 500k log rows were ~5.8 MiB on disk and 200k spans ~1.2 MiB.
+
+### Measured (single-node, local load probe)
+
+A rough sense of scale (one ClickHouse container, synchronous batched inserts):
+
+| Signal | Ingest | Read latency (over 500k logs / 200k spans / 10k metric series) |
+| --- | --- | --- |
+| Logs | ~200k rows/s | line filter 19ms · labelValues 5ms |
+| Traces | ~180k rows/s | error search 18ms · duration filter 24ms |
+| Metrics | ~145k points/s | p95-by-route 7ms · `_count` increase 5ms · quantile range 6ms |
+
+Not a benchmark, but it shows the schema is indexed/partitioned well enough that
+dashboard queries stay in single/low-double-digit milliseconds at that volume.
 
 ## 3. Ingest
 
