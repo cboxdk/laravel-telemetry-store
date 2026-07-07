@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Cbox\TelemetryStore\Console;
 
 use Cbox\TelemetryStore\ClickHouse\Client;
+use Cbox\TelemetryStore\ClickHouse\Engine;
 use Cbox\TelemetryStore\ClickHouse\Schema;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Config\Repository as Config;
@@ -28,7 +29,11 @@ final class InstallSchemaCommand extends Command
             ? (int) $this->option('retention')
             : (int) $config->get('telemetry-store.retention_days', 30);
 
-        foreach (Schema::statements($retention) as $statement) {
+        /** @var array<string, mixed> $engineConfig */
+        $engineConfig = (array) $config->get('telemetry-store.clickhouse.engine', []);
+        $engine = Engine::fromConfig($engineConfig);
+
+        foreach (Schema::statements($retention, $engine) as $statement) {
             $table = self::tableName($statement);
 
             try {

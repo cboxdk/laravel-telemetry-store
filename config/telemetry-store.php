@@ -25,6 +25,25 @@ return [
             'async_insert' => 1,
             'wait_for_async_insert' => 0,
         ],
+
+        /*
+        |----------------------------------------------------------------------
+        | Storage engine (HA)
+        |----------------------------------------------------------------------
+        |
+        | Single-node uses a plain MergeTree. For high availability, enable
+        | `replicated` (needs ClickHouse Keeper/ZooKeeper); set `cluster` to
+        | also create the tables `ON CLUSTER` across all nodes at once. The
+        | `{shard}`/`{database}`/`{replica}` macros resolve from each node's
+        | config; `{table}` is substituted per table.
+        |
+        */
+        'engine' => [
+            'replicated' => (bool) env('TELEMETRY_STORE_CLICKHOUSE_REPLICATED', false),
+            'zoo_path' => env('TELEMETRY_STORE_CLICKHOUSE_ZOO_PATH', '/clickhouse/tables/{shard}/{database}/{table}'),
+            'replica' => env('TELEMETRY_STORE_CLICKHOUSE_REPLICA', '{replica}'),
+            'cluster' => env('TELEMETRY_STORE_CLICKHOUSE_CLUSTER'),
+        ],
     ],
 
     /*

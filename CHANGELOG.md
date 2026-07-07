@@ -2,6 +2,16 @@
 
 All notable changes to `cboxdk/laravel-telemetry-store` are documented here.
 
+## v1.2.0
+
+### Added
+- **High availability.** The schema engine is configurable: a plain `MergeTree`
+  for single-node, or `ReplicatedMergeTree` (optionally `ON CLUSTER`) for HA via
+  `telemetry-store.clickhouse.engine`. The `{shard}`/`{database}`/`{replica}`
+  macros resolve per node; `{table}` is substituted per table. Verified against a
+  Keeper-enabled ClickHouse (tables registered in Keeper, ingest + reads work
+  through the replicated tables).
+
 ## v1.1.1
 
 ### Added
