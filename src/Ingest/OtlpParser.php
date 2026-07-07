@@ -40,8 +40,8 @@ final class OtlpParser
                         'SeverityNumber' => Otlp::int($record['severityNumber'] ?? 0),
                         'ServiceName' => $service,
                         'Body' => Otlp::scalar($record['body'] ?? null),
-                        'ResourceAttributes' => $resource,
-                        'LogAttributes' => Otlp::attributes($record['attributes'] ?? null),
+                        'ResourceAttributes' => Otlp::map($resource),
+                        'LogAttributes' => Otlp::attributeMap($record['attributes'] ?? null),
                     ];
                 }
             }
@@ -80,8 +80,8 @@ final class OtlpParser
                         'SpanName' => Otlp::string($span['name'] ?? ''),
                         'SpanKind' => self::spanKind($span['kind'] ?? null),
                         'ServiceName' => $service,
-                        'ResourceAttributes' => $resource,
-                        'SpanAttributes' => Otlp::attributes($span['attributes'] ?? null),
+                        'ResourceAttributes' => Otlp::map($resource),
+                        'SpanAttributes' => Otlp::attributeMap($span['attributes'] ?? null),
                         'Duration' => max(0, $end - $start),
                         'StatusCode' => self::statusCode($status['code'] ?? null),
                         'StatusMessage' => Otlp::string($status['message'] ?? ''),
@@ -151,7 +151,7 @@ final class OtlpParser
             'MetricName' => $name,
             'ServiceName' => $service,
             'ResourceAttributes' => $resource,
-            'Attributes' => Otlp::attributes($point['attributes'] ?? null),
+            'Attributes' => Otlp::attributeMap($point['attributes'] ?? null),
             'Value' => array_key_exists('asInt', $point) ? Otlp::float($point['asInt']) : Otlp::float($point['asDouble'] ?? 0),
         ];
     }
@@ -171,7 +171,7 @@ final class OtlpParser
             'MetricName' => $name,
             'ServiceName' => $service,
             'ResourceAttributes' => $resource,
-            'Attributes' => Otlp::attributes($point['attributes'] ?? null),
+            'Attributes' => Otlp::attributeMap($point['attributes'] ?? null),
             'Count' => Otlp::int($point['count'] ?? 0),
             'Sum' => Otlp::float($point['sum'] ?? 0),
             'BucketCounts' => array_map(Otlp::int(...), self::listOf($point, 'bucketCounts', 'bucket_counts')),

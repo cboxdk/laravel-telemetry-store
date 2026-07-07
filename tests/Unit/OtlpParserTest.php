@@ -33,7 +33,7 @@ it('maps OTLP log records to otel_logs rows', function (): void {
         ->and($row['Body'])->toBe('analytics.page_view')
         ->and($row['SeverityText'])->toBe('ERROR')
         ->and($row['TraceId'])->toBe('abc123')
-        ->and($row['Timestamp'])->toBe('1712345678.123456789')
+        ->and($row['Timestamp'])->toBe('2024-04-05 19:34:38.123456789')
         ->and($row['ResourceAttributes'])->toBe([
             'service.name' => 'checkout',
             'deployment.environment.name' => 'prod',

@@ -66,8 +66,9 @@ final class Otlp
     }
 
     /**
-     * A nanosecond epoch as a ClickHouse DateTime64(9) literal string
-     * (`1712345678.123456789`).
+     * A nanosecond epoch as a ClickHouse `DateTime64(9, 'UTC')` insert literal
+     * (`2024-04-05 18:14:38.123456789`) — a plain numeric string is parsed as a
+     * date and rejected, so we format UTC wall-clock with 9 fractional digits.
      *
      * @param  mixed  $nano
      */
@@ -78,7 +79,7 @@ final class Otlp
         $seconds = intdiv($ns, 1_000_000_000);
         $fraction = $ns % 1_000_000_000;
 
-        return sprintf('%d.%09d', $seconds, $fraction);
+        return gmdate('Y-m-d H:i:s', $seconds).'.'.sprintf('%09d', $fraction);
     }
 
     /**
@@ -115,5 +116,32 @@ final class Otlp
     public static function serviceName(array $resourceAttributes): string
     {
         return $resourceAttributes['service.name'] ?? 'unknown_service';
+    }
+
+    /**
+     * A JSON value for a ClickHouse `Map` column. An empty PHP array encodes as
+     * `[]`, which ClickHouse rejects for a Map (it wants `{}`), so an empty map
+     * becomes an object; a non-empty assoc array already encodes as an object.
+     *
+     * @param  mixed  $attributes
+     * @return object|array<string, string>
+     */
+    public static function attributeMap($attributes): object|array
+    {
+        $map = self::attributes($attributes);
+
+        return $map === [] ? new \stdClass : $map;
+    }
+
+    /**
+     * Wrap an already-flattened attribute array for a Map column (see
+     * {@see attributeMap()}).
+     *
+     * @param  array<string, string>  $map
+     * @return object|array<string, string>
+     */
+    public static function map(array $map): object|array
+    {
+        return $map === [] ? new \stdClass : $map;
     }
 }
