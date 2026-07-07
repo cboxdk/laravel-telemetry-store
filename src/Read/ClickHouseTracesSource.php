@@ -72,7 +72,8 @@ final readonly class ClickHouseTracesSource implements TracesSource
     public function trace(string $traceId): Trace
     {
         $sql = 'SELECT SpanId, ParentSpanId, SpanName, ServiceName, SpanKind, '
-            .'toUnixTimestamp64Nano(Timestamp) AS StartNano, Duration, StatusCode, SpanAttributes, ResourceAttributes '
+            .'toUnixTimestamp64Nano(Timestamp) AS StartNano, Duration, StatusCode, SpanAttributes, ResourceAttributes, '
+            .'Links.TraceId AS LinkTraceIds, Links.SpanId AS LinkSpanIds '
             .'FROM otel_traces WHERE TraceId = '.Sql::quote($traceId)
             .' ORDER BY Timestamp ASC LIMIT 5000';
 
@@ -96,6 +97,7 @@ final readonly class ClickHouseTracesSource implements TracesSource
                 endNano: $start + (int) ($row['Duration'] ?? 0),
                 attributes: self::map($row['SpanAttributes'] ?? null),
                 hasError: ($row['StatusCode'] ?? null) === 'Error',
+                links: self::links($row['LinkTraceIds'] ?? null, $row['LinkSpanIds'] ?? null),
             );
 
             if ($service !== '' && ! isset($services[$service])) {
@@ -178,6 +180,33 @@ final readonly class ClickHouseTracesSource implements TracesSource
             str_starts_with($tag, 'span.') => 'SpanAttributes['.Sql::quote(substr($tag, 5)).']',
             default => 'SpanAttributes['.Sql::quote($tag).']',
         };
+    }
+
+    /**
+     * Zip the parallel `Links.TraceId` / `Links.SpanId` arrays into the UI's
+     * span-link shape.
+     *
+     * @param  mixed  $traceIds
+     * @param  mixed  $spanIds
+     * @return list<array{traceId: string, spanId: string}>
+     */
+    private static function links($traceIds, $spanIds): array
+    {
+        if (! is_array($traceIds) || ! is_array($spanIds)) {
+            return [];
+        }
+
+        $traceIds = array_values($traceIds);
+        $spanIds = array_values($spanIds);
+        $links = [];
+
+        foreach ($traceIds as $i => $traceId) {
+            if (is_string($traceId) && $traceId !== '' && isset($spanIds[$i]) && is_string($spanIds[$i])) {
+                $links[] = ['traceId' => $traceId, 'spanId' => $spanIds[$i]];
+            }
+        }
+
+        return $links;
     }
 
     /**

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: pint · phpstan · pest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # This package resolves cboxdk/laravel-telemetry-ui via a sibling path
+      # repository, so check both out next to each other under the workspace.
+      - name: Checkout store
+        uses: actions/checkout@v6
+        with:
+          path: laravel-telemetry-store
+
+      - name: Checkout telemetry-ui (sibling)
+        uses: actions/checkout@v6
+        with:
+          repository: cboxdk/laravel-telemetry-ui
+          ref: main
+          path: laravel-telemetry-ui
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, bcmath, intl, fileinfo
+          coverage: none
+
+      - name: Install dependencies
+        working-directory: laravel-telemetry-store
+        run: composer update --prefer-dist --no-interaction
+
+      - name: Pint
+        working-directory: laravel-telemetry-store
+        run: vendor/bin/pint --test
+
+      - name: PHPStan
+        working-directory: laravel-telemetry-store
+        run: vendor/bin/phpstan --error-format=github --memory-limit=1G
+
+      # The tests/E2E suite is gated on a reachable ClickHouse on :18123 and
+      # skips here; run it locally against a live store. Unit + Feature run.
+      - name: Pest
+        working-directory: laravel-telemetry-store
+        run: vendor/bin/pest --ci

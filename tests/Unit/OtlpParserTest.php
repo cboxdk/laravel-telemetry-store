@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Cbox\TelemetryStore\Ingest\OtlpParser;
+use Cbox\TelemetryStore\Ingest\PromName;
 
 it('maps OTLP log records to otel_logs rows', function (): void {
     $rows = (new OtlpParser)->logs([
@@ -54,7 +55,7 @@ it('splits OTLP metrics into sum, gauge and histogram rows', function (): void {
                     ['name' => 'queue.depth', 'gauge' => [
                         'dataPoints' => [['timeUnixNano' => '1000000000', 'asInt' => '7']],
                     ]],
-                    ['name' => 'http.server.request.duration', 'histogram' => [
+                    ['name' => 'http.server.request.duration', 'unit' => 'ms', 'histogram' => [
                         'dataPoints' => [['timeUnixNano' => '1000000000', 'count' => '3', 'sum' => 12.0, 'bucketCounts' => ['1', '2'], 'explicitBounds' => [10.0]]],
                     ]],
                 ],
@@ -62,17 +63,29 @@ it('splits OTLP metrics into sum, gauge and histogram rows', function (): void {
         ]],
     ]);
 
+    // Stored under the emitter's Prometheus names: monotonic counter → _total,
+    // gauge → bare, histogram → base + unit suffix.
     expect($out['sum'])->toHaveCount(1)
-        ->and($out['sum'][0]['MetricName'])->toBe('queue.jobs.processed')
+        ->and($out['sum'][0]['MetricName'])->toBe('queue_jobs_processed_total')
         ->and($out['sum'][0]['Value'])->toBe(42.0)
         ->and($out['sum'][0]['IsMonotonic'])->toBeTrue()
         ->and($out['sum'][0]['Attributes'])->toBe(['queue' => 'default'])
         ->and($out['gauge'])->toHaveCount(1)
+        ->and($out['gauge'][0]['MetricName'])->toBe('queue_depth')
         ->and($out['gauge'][0]['Value'])->toBe(7.0)
         ->and($out['histogram'])->toHaveCount(1)
+        ->and($out['histogram'][0]['MetricName'])->toBe('http_server_request_duration_milliseconds')
         ->and($out['histogram'][0]['Count'])->toBe(3)
         ->and($out['histogram'][0]['BucketCounts'])->toBe([1, 2])
         ->and($out['histogram'][0]['ExplicitBounds'])->toBe([10.0]);
+});
+
+it('maps OTLP metric names to the emitter Prometheus names', function (): void {
+    expect(PromName::from('db.queries', '', true))->toBe('db_queries_total')
+        ->and(PromName::from('http.server.request.duration', 'ms', false))->toBe('http_server_request_duration_milliseconds')
+        ->and(PromName::from('http.server.memory.peak', 'By', false))->toBe('http_server_memory_peak_bytes')
+        ->and(PromName::from('system.cpu.utilization', '1', false))->toBe('system_cpu_utilization')
+        ->and(PromName::from('queue.size', '{jobs}', false))->toBe('queue_size');
 });
 
 it('maps span kind and status to the collector spellings', function (): void {

@@ -70,23 +70,44 @@ final readonly class ClickHouseMetricsSource implements MetricsSource
 
         $step ??= max(15, (int) ceil(($end->getTimestamp() - $start->getTimestamp()) / 250));
 
+        [$select, $groupBy] = $this->grouping($query);
+        $bucketCol = 'toUnixTimestamp(toStartOfInterval(Timestamp, INTERVAL '.$step.' SECOND)) AS t';
+
+        // Histogram quantile per time bucket: sum the bucket arrays in each
+        // bucket, compute the quantile in PHP.
         if ($query->quantile !== null) {
-            // Range quantiles would bucket the histogram per step; not yet
-            // implemented — a single-series empty result keeps charts quiet.
-            return [];
+            $sql = 'SELECT '.implode(', ', [$bucketCol, ...$select, 'sumForEach(BucketCounts) AS buckets', 'any(ExplicitBounds) AS bounds'])
+                .' FROM '.MetricName::TABLE_HISTOGRAM
+                .' WHERE '.$this->where($query, $start->getTimestamp(), $end->getTimestamp())
+                .' GROUP BY '.implode(', ', ['t', ...$groupBy])
+                .' ORDER BY t';
+
+            return $this->buildSeries($sql, $query, function (array $row) use ($query): float {
+                $buckets = array_values(array_map(self::float(...), is_array($row['buckets'] ?? null) ? $row['buckets'] : []));
+                $bounds = array_values(array_map(self::float(...), is_array($row['bounds'] ?? null) ? $row['bounds'] : []));
+
+                return Histogram::quantile($buckets, $bounds, $query->quantile ?? 0.95);
+            });
         }
 
-        [$select, $groupBy] = $this->grouping($query);
-
-        $bucket = 'toUnixTimestamp(toStartOfInterval(Timestamp, INTERVAL '.$step.' SECOND)) AS t';
-        $value = $this->bucketValueExpr($query, $step).' AS v';
-
-        $sql = 'SELECT '.implode(', ', [$bucket, ...$select, $value])
+        $sql = 'SELECT '.implode(', ', [$bucketCol, ...$select, $this->bucketValueExpr($query, $step).' AS v'])
             .' FROM '.$this->table($query)
             .' WHERE '.$this->where($query, $start->getTimestamp(), $end->getTimestamp())
             .' GROUP BY '.implode(', ', ['t', ...$groupBy])
             .' ORDER BY t';
 
+        return $this->buildSeries($sql, $query, fn (array $row): float => $this->scaled($query, (float) ($row['v'] ?? 0)));
+    }
+
+    /**
+     * Group range-query rows into one {@see TimeSeries} per label set, taking the
+     * per-row value from $value.
+     *
+     * @param  callable(array<string, mixed>): float  $value
+     * @return list<TimeSeries>
+     */
+    private function buildSeries(string $sql, MetricQuery $query, callable $value): array
+    {
         /** @var array<string, array{labels: array<string, string>, points: list<DataPoint>}> $series */
         $series = [];
 
@@ -97,7 +118,7 @@ final readonly class ClickHouseMetricsSource implements MetricsSource
             $series[$key] ??= ['labels' => $labels, 'points' => []];
             $series[$key]['points'][] = new DataPoint(
                 timestamp: (float) ($row['t'] ?? 0),
-                value: $this->scaled($query, (float) ($row['v'] ?? 0)),
+                value: $value($row),
             );
         }
 
@@ -142,18 +163,21 @@ final readonly class ClickHouseMetricsSource implements MetricsSource
     }
 
     /**
-     * The per-group value for an instant query: a windowed delta for a counter,
-     * the latest value for a gauge, or the histogram count/sum delta.
+     * The per-group value for an instant query: latest value for a gauge, a
+     * windowed delta for an increase, delta/window for a rate, or the histogram
+     * count/sum delta.
      */
     private function valueExpr(MetricQuery $query): string
     {
         $part = MetricName::histogramPart($query->name);
+        $delta = 'greatest(max(Value) - min(Value), 0)';
 
         return match (true) {
-            $part === 'count' => 'toFloat64(max(Count) - min(Count))',
-            $part === 'sum' => 'max(Sum) - min(Sum)',
+            $part === 'count' => 'toFloat64(greatest(max(Count) - min(Count), 0))',
+            $part === 'sum' => 'greatest(max(Sum) - min(Sum), 0)',
             $query->fn === MetricFn::None => 'argMax(Value, Timestamp)',
-            default => 'greatest(max(Value) - min(Value), 0)',
+            $query->fn === MetricFn::Rate => '('.$delta.') / '.max(1, $this->windowSeconds($query, 60)),
+            default => $delta, // Increase, CounterIncrease
         };
     }
 
@@ -168,10 +192,8 @@ final readonly class ClickHouseMetricsSource implements MetricsSource
 
     private function scaled(MetricQuery $query, float $value): float
     {
-        $value = $query->fn === MetricFn::Rate && $query->scalar === null
-            ? $value / max(1, $this->windowSeconds($query, 60))
-            : $value;
-
+        // Rate division happens in the value expression (instant) / bucket
+        // expression (range); here we only apply the scalar multiplier (e.g. *60).
         return $query->scalar !== null ? $value * $query->scalar : $value;
     }
 

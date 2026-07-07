@@ -85,12 +85,62 @@ final class OtlpParser
                         'Duration' => max(0, $end - $start),
                         'StatusCode' => self::statusCode($status['code'] ?? null),
                         'StatusMessage' => Otlp::string($status['message'] ?? ''),
+                        ...self::events($span),
+                        ...self::links($span),
                     ];
                 }
             }
         }
 
         return $rows;
+    }
+
+    /**
+     * A span's events as the parallel-array form ClickHouse's JSONEachRow wants
+     * for the `Events` Nested column. Empty individual attribute maps become
+     * objects (empty Map = `{}`).
+     *
+     * @param  array<string, mixed>  $span
+     * @return array{'Events.Timestamp': list<string>, 'Events.Name': list<string>, 'Events.Attributes': list<object|array<string, string>>}
+     */
+    private static function events(array $span): array
+    {
+        $timestamps = $names = $attributes = [];
+
+        foreach (self::listOf($span, 'events') as $event) {
+            if (! is_array($event)) {
+                continue;
+            }
+
+            $timestamps[] = Otlp::nanoToDateTime64($event['timeUnixNano'] ?? 0);
+            $names[] = Otlp::string($event['name'] ?? '');
+            $attributes[] = Otlp::attributeMap($event['attributes'] ?? null);
+        }
+
+        return ['Events.Timestamp' => $timestamps, 'Events.Name' => $names, 'Events.Attributes' => $attributes];
+    }
+
+    /**
+     * A span's links as the parallel-array form for the `Links` Nested column.
+     *
+     * @param  array<string, mixed>  $span
+     * @return array{'Links.TraceId': list<string>, 'Links.SpanId': list<string>, 'Links.Attributes': list<object|array<string, string>>}
+     */
+    private static function links(array $span): array
+    {
+        $traceIds = $spanIds = $attributes = [];
+
+        foreach (self::listOf($span, 'links') as $link) {
+            if (! is_array($link)) {
+                continue;
+            }
+
+            $traceIds[] = Otlp::string($link['traceId'] ?? '');
+            $spanIds[] = Otlp::string($link['spanId'] ?? '');
+            $attributes[] = Otlp::attributeMap($link['attributes'] ?? null);
+        }
+
+        return ['Links.TraceId' => $traceIds, 'Links.SpanId' => $spanIds, 'Links.Attributes' => $attributes];
     }
 
     /**
@@ -111,20 +161,32 @@ final class OtlpParser
                         continue;
                     }
 
-                    $name = Otlp::string($metric['name'] ?? '');
+                    // Store under the emitter's Prometheus name (dots→underscores +
+                    // unit suffix + _total for monotonic counters), so the cards'
+                    // Prometheus-style queries match. OTLP carries the unit separately.
+                    $otlpName = Otlp::string($metric['name'] ?? '');
+                    $unit = Otlp::string($metric['unit'] ?? '');
 
                     if (is_array($metric['sum'] ?? null)) {
+                        $monotonic = (bool) ($metric['sum']['isMonotonic'] ?? false);
+                        $name = PromName::from($otlpName, $unit, $monotonic);
+
                         foreach (self::listOf($metric['sum'], 'dataPoints', 'data_points') as $point) {
                             $out['sum'][] = self::numberPoint($name, $service, $resource, $point) + [
                                 'AggregationTemporality' => Otlp::int($metric['sum']['aggregationTemporality'] ?? 0),
-                                'IsMonotonic' => (bool) ($metric['sum']['isMonotonic'] ?? false),
+                                'IsMonotonic' => $monotonic,
                             ];
                         }
                     } elseif (is_array($metric['gauge'] ?? null)) {
+                        $name = PromName::from($otlpName, $unit, false);
+
                         foreach (self::listOf($metric['gauge'], 'dataPoints', 'data_points') as $point) {
                             $out['gauge'][] = self::numberPoint($name, $service, $resource, $point);
                         }
                     } elseif (is_array($metric['histogram'] ?? null)) {
+                        // Base name only; _bucket/_count/_sum are reconstructed at read time.
+                        $name = PromName::from($otlpName, $unit, false);
+
                         foreach (self::listOf($metric['histogram'], 'dataPoints', 'data_points') as $point) {
                             $out['histogram'][] = self::histogramPoint($name, $service, $resource, $point, Otlp::int($metric['histogram']['aggregationTemporality'] ?? 0));
                         }

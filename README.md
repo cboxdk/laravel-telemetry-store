@@ -50,6 +50,10 @@ TELEMETRY_OTLP_ENDPOINT=https://your-app.test/telemetry-store
 Then select the ClickHouse driver in `telemetry-ui.connections` (see the UI
 package docs).
 
+**For production** — ClickHouse host-access, retention, securing the ingest
+endpoint, throughput and connecting the dashboard — see
+[docs/deployment.md](docs/deployment.md).
+
 ## Schema
 
 Modelled on the OpenTelemetry Collector's `clickhouseexporter` tables so the
