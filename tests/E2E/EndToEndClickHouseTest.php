@@ -6,10 +6,17 @@ use Cbox\TelemetryStore\ClickHouse\Client;
 use Cbox\TelemetryStore\ClickHouse\Schema;
 use Cbox\TelemetryStore\Ingest\ClickHouseWriter;
 use Cbox\TelemetryStore\Ingest\OtlpParser;
+use Cbox\TelemetryStore\Read\ClickHouseTracesSource;
 use Cbox\TelemetryStore\Tests\E2ETestCase;
 use Cbox\TelemetryUi\Cards\Builtin\LogViewer;
+use Cbox\TelemetryUi\Cards\Builtin\QueryPerformance;
 use Cbox\TelemetryUi\Cards\Builtin\RequestsActivity;
 use Cbox\TelemetryUi\Cards\Builtin\UnifiedErrors;
+use Cbox\TelemetryUi\Contracts\AggregatesSpans;
+use Cbox\TelemetryUi\Queries\Ir\SpanAggregation;
+use Cbox\TelemetryUi\Queries\Ir\SpanSort;
+use Cbox\TelemetryUi\Queries\Ir\TraceCondition;
+use Cbox\TelemetryUi\Queries\Ir\TraceQuery;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Livewire\Livewire;
 
@@ -88,4 +95,91 @@ it('renders the RequestsActivity metrics card against ClickHouse without a drive
         ->assertDontSee('Unexpected response')
         ->assertDontSee('Could not reach')
         ->assertDontSee('store query failed');
+});
+
+/**
+ * Seed real db.client spans for two parameterised statements and prove the
+ * exact server-side aggregation ranks them by TOTAL db time, carries the
+ * db.system.name, and converts ns → ms — against a live ClickHouse.
+ *
+ *   query A "... users where id = ?" : 5 calls × 4ms = 20ms total
+ *   query B "... orders where uid = ?": 2 calls × 3ms =  6ms total
+ */
+function seedDbSpans(Client $ch): void
+{
+    $now = time();
+    $ns = static fn (int $ago): string => (string) (($now - $ago) * 1_000_000_000);
+
+    $span = static function (string $id, string $sql, int $startAgo, int $durationMs) use ($ns): array {
+        $startNs = (int) $ns($startAgo);
+
+        return [
+            'traceId' => 'trace-'.$id, 'spanId' => 'span-'.$id, 'name' => 'db.query',
+            'kind' => 3,
+            'startTimeUnixNano' => (string) $startNs,
+            'endTimeUnixNano' => (string) ($startNs + $durationMs * 1_000_000),
+            'attributes' => [
+                ['key' => 'db.query.text', 'value' => ['stringValue' => $sql]],
+                ['key' => 'db.system.name', 'value' => ['stringValue' => 'mysql']],
+            ],
+        ];
+    };
+
+    $queryA = 'select * from users where id = ?';
+    $queryB = 'select * from orders where user_id = ?';
+    $spans = [];
+    foreach (range(1, 5) as $i) {
+        $spans[] = $span('a'.$i, $queryA, 30, 4);
+    }
+    foreach (range(1, 2) as $i) {
+        $spans[] = $span('b'.$i, $queryB, 30, 3);
+    }
+
+    (new ClickHouseWriter($ch))->writeTraces((new OtlpParser)->traces([
+        'resourceSpans' => [[
+            'resource' => ['attributes' => [['key' => 'service.name', 'value' => ['stringValue' => 'demo']]]],
+            'scopeSpans' => [['spans' => $spans]],
+        ]],
+    ]));
+}
+
+it('aggregates spans exactly against live ClickHouse: total-time ranking, carried system, ns→ms', function (): void {
+    $ch = new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, 'telemetry', settings: ['wait_for_async_insert' => 1]);
+    seedDbSpans($ch);
+
+    $source = new ClickHouseTracesSource($ch);
+    expect($source)->toBeInstanceOf(AggregatesSpans::class);
+
+    $buckets = $source->aggregateSpans(
+        new SpanAggregation(
+            where: (new TraceQuery)->where(TraceCondition::nil('span.db.query.text')),
+            groupBy: 'span.db.query.text',
+            carry: ['span.db.system.name'],
+            sort: SpanSort::Total,
+        ),
+        new DateTimeImmutable('@'.(time() - 3600)),
+        new DateTimeImmutable('@'.(time() + 60)),
+    );
+
+    expect($buckets)->toHaveCount(2)
+        ->and($buckets[0]->key)->toBe('select * from users where id = ?')
+        ->and($buckets[0]->count)->toBe(5)
+        ->and($buckets[0]->avgMs)->toBe(4.0)
+        ->and($buckets[0]->maxMs)->toBe(4.0)
+        ->and($buckets[0]->totalMs)->toBe(20.0)
+        ->and($buckets[0]->attributes['db.system.name'])->toBe('mysql')
+        ->and($buckets[1]->key)->toBe('select * from orders where user_id = ?')
+        ->and($buckets[1]->count)->toBe(2)
+        ->and($buckets[1]->totalMs)->toBe(6.0);
+});
+
+it('renders the QueryPerformance card using the exact aggregation from ClickHouse', function (): void {
+    seedDbSpans(new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, 'telemetry', settings: ['wait_for_async_insert' => 1]));
+
+    Livewire::test(QueryPerformance::class)
+        ->assertOk()
+        ->assertSee('select * from users where id = ?')
+        ->assertSee('select * from orders where user_id = ?')
+        ->assertDontSee('store query failed')
+        ->assertDontSee('Could not reach');
 });
