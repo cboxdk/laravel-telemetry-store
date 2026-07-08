@@ -12,6 +12,19 @@ All notable changes to `cboxdk/laravel-telemetry-store` are documented here.
   exact ranking by total DB time over *every* span — something Tempo can't do
   for high-cardinality attributes like `db.query.text`. Raw TraceQL
   aggregations are rejected; the structured `TraceQuery` API only.
+  Verified end-to-end against a live ClickHouse (total-time ranking, ns → ms,
+  carried `db.system.name`, and the rendered `QueryPerformance` card).
+
+### Notes
+- **Running ClickHouse for the local E2E suite.** Since the `24.x` server image,
+  the entrypoint disables network access for the passwordless `default` user
+  unless you set a password or pass `CLICKHOUSE_SKIP_USER_SETUP=1`. The E2E
+  tests connect without credentials, so start a throwaway container with that
+  flag: `docker run --rm -e CLICKHOUSE_SKIP_USER_SETUP=1 -p 18123:8123
+  clickhouse/clickhouse-server:24.8`. Without it, queries fail with
+  `AUTHENTICATION_FAILED` (code 516) even though `/ping` returns `Ok`. (CI
+  achieves the same by mounting `.github/clickhouse/open.xml` into
+  `users.d/` instead of using the env flag.)
 
 ## v1.2.0
 
