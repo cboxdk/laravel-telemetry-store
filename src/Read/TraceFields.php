@@ -67,7 +67,7 @@ final class TraceFields
         };
     }
 
-    private static function expr(string $field): string
+    public static function expr(string $field): string
     {
         return match (true) {
             $field === 'name' => 'SpanName',

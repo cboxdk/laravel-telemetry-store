@@ -6,10 +6,14 @@ namespace Cbox\TelemetryStore\Read;
 
 use Cbox\TelemetryStore\ClickHouse\Client;
 use Cbox\TelemetryUi\Connectors\SourceException;
+use Cbox\TelemetryUi\Contracts\AggregatesSpans;
 use Cbox\TelemetryUi\Contracts\TracesSource;
+use Cbox\TelemetryUi\Queries\Ir\SpanAggregation;
+use Cbox\TelemetryUi\Queries\Ir\SpanSort;
 use Cbox\TelemetryUi\Queries\Ir\TraceQuery;
 use Cbox\TelemetryUi\Queries\Results\MatchedSpan;
 use Cbox\TelemetryUi\Queries\Results\Span;
+use Cbox\TelemetryUi\Queries\Results\SpanBucket;
 use Cbox\TelemetryUi\Queries\Results\SpanKind;
 use Cbox\TelemetryUi\Queries\Results\Trace;
 use Cbox\TelemetryUi\Queries\Results\TraceSummary;
@@ -27,9 +31,80 @@ use Throwable;
  * spans — good enough for the list display; the full waterfall comes from
  * {@see Trace()}.
  */
-final readonly class ClickHouseTracesSource implements TracesSource
+final readonly class ClickHouseTracesSource implements AggregatesSpans, TracesSource
 {
     public function __construct(private Client $client) {}
+
+    /**
+     * Exact span aggregation over `otel_traces`: GROUP BY the attribute with
+     * count/avg/p95/max/sum of Duration (ns → ms). This is what lets the
+     * query-performance view rank by total DB time over EVERY span, not a
+     * sample — the thing Tempo can't do for high-cardinality attributes.
+     */
+    public function aggregateSpans(SpanAggregation $aggregation, DateTimeInterface $start, DateTimeInterface $end): array
+    {
+        if ($aggregation->where->raw !== null) {
+            throw SourceException::because('The ClickHouse traces driver cannot aggregate a raw TraceQL query; use the structured TraceQuery API.');
+        }
+
+        $group = TraceFields::expr($aggregation->groupBy);
+
+        $where = array_merge(
+            [
+                'Timestamp >= fromUnixTimestamp('.$start->getTimestamp().')',
+                'Timestamp <= fromUnixTimestamp('.$end->getTimestamp().')',
+                $group." != ''",
+            ],
+            array_map(TraceFields::condition(...), $aggregation->where->conditions),
+        );
+
+        $select = [
+            $group.' AS k',
+            'count() AS c',
+            'avg(Duration) AS a',
+            'quantile('.self::number($aggregation->quantile).')(Duration) AS p',
+            'max(Duration) AS mx',
+            'sum(Duration) AS s',
+        ];
+
+        $carry = [];
+        foreach (array_values($aggregation->carry) as $i => $field) {
+            $select[] = 'any('.TraceFields::expr($field).') AS carry_'.$i;
+            $carry[$i] = self::attrName($field);
+        }
+
+        $sortColumn = match ($aggregation->sort) {
+            SpanSort::Avg => 'a',
+            SpanSort::P95 => 'p',
+            SpanSort::Max => 'mx',
+            SpanSort::Calls => 'c',
+            default => 's',
+        };
+
+        $sql = 'SELECT '.implode(', ', $select)
+            .' FROM otel_traces WHERE '.implode(' AND ', $where)
+            .' GROUP BY k ORDER BY '.$sortColumn.' DESC LIMIT '.max(1, $aggregation->limit);
+
+        return array_map(function (array $row) use ($carry): SpanBucket {
+            $attributes = [];
+            foreach ($carry as $i => $name) {
+                $value = $row['carry_'.$i] ?? null;
+                if (is_string($value) && $value !== '') {
+                    $attributes[$name] = $value;
+                }
+            }
+
+            return new SpanBucket(
+                key: is_string($row['k'] ?? null) ? $row['k'] : '',
+                count: (int) self::float($row['c'] ?? 0),
+                avgMs: self::float($row['a'] ?? 0) / 1_000_000,
+                p95Ms: self::float($row['p'] ?? 0) / 1_000_000,
+                maxMs: self::float($row['mx'] ?? 0) / 1_000_000,
+                totalMs: self::float($row['s'] ?? 0) / 1_000_000,
+                attributes: $attributes,
+            );
+        }, $this->select($sql));
+    }
 
     public function search(TraceQuery $query, DateTimeInterface $start, DateTimeInterface $end, int $limit = 20): array
     {
@@ -228,6 +303,28 @@ final readonly class ClickHouseTracesSource implements TracesSource
         }
 
         return $out;
+    }
+
+    /** The attribute key a carried field lands under (drop the `span.`/`resource.` scope). */
+    private static function attrName(string $field): string
+    {
+        return match (true) {
+            str_starts_with($field, 'span.') => substr($field, 5),
+            str_starts_with($field, 'resource.') => substr($field, 9),
+            default => $field,
+        };
+    }
+
+    /** ClickHouse returns UInt64/aggregate values as JSON numbers or strings; coerce either to float. */
+    private static function float(mixed $value): float
+    {
+        return is_numeric($value) ? (float) $value : 0.0;
+    }
+
+    /** A quantile like 0.95 as an unlocalised SQL literal. */
+    private static function number(float $value): string
+    {
+        return rtrim(rtrim(number_format($value, 6, '.', ''), '0'), '.');
     }
 
     /**

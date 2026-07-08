@@ -2,6 +2,17 @@
 
 All notable changes to `cboxdk/laravel-telemetry-store` are documented here.
 
+## v1.3.0
+
+### Added
+- **Exact span aggregation.** `ClickHouseTracesSource` implements the UI's
+  `AggregatesSpans` contract: a single `GROUP BY` over `otel_traces` returns
+  count/avg/p95/max/sum of `Duration` (ns → ms) per attribute value, with
+  carried representative attributes. This powers the query-performance view's
+  exact ranking by total DB time over *every* span — something Tempo can't do
+  for high-cardinality attributes like `db.query.text`. Raw TraceQL
+  aggregations are rejected; the structured `TraceQuery` API only.
+
 ## v1.2.0
 
 ### Added

@@ -5,11 +5,16 @@ declare(strict_types=1);
 use Cbox\TelemetryStore\ClickHouse\Client;
 use Cbox\TelemetryStore\Read\ClickHouseLogsSource;
 use Cbox\TelemetryStore\Read\ClickHouseMetricsSource;
+use Cbox\TelemetryStore\Read\ClickHouseTracesSource;
 use Cbox\TelemetryUi\Connectors\SourceException;
 use Cbox\TelemetryUi\Queries\Ir\LabelMatcher;
 use Cbox\TelemetryUi\Queries\Ir\LogQuery;
 use Cbox\TelemetryUi\Queries\Ir\MatchOp;
 use Cbox\TelemetryUi\Queries\Ir\MetricQuery;
+use Cbox\TelemetryUi\Queries\Ir\SpanAggregation;
+use Cbox\TelemetryUi\Queries\Ir\SpanSort;
+use Cbox\TelemetryUi\Queries\Ir\TraceCondition;
+use Cbox\TelemetryUi\Queries\Ir\TraceQuery;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Support\Facades\Http;
 
@@ -89,3 +94,75 @@ it('reads a gauge metric as its latest value', function (): void {
             && str_contains($sql, "Attributes['queue'] AS `queue`");
     });
 });
+
+it('aggregates spans server-side: GROUP BY the attribute with duration stats in ms', function (): void {
+    // Durations come back in nanoseconds; the driver divides by 1e6 → ms.
+    chRespond([
+        [
+            'k' => 'select * from users where id = ?',
+            'c' => '1200',
+            'a' => 2_500_000,
+            'p' => 9_000_000,
+            'mx' => 42_000_000,
+            's' => 3_000_000_000,
+            'carry_0' => 'mysql',
+        ],
+        [
+            'k' => 'select * from orders where user_id = ?',
+            'c' => '300',
+            'a' => 1_000_000,
+            'p' => 4_000_000,
+            'mx' => 8_000_000,
+            's' => 300_000_000,
+            'carry_0' => 'mysql',
+        ],
+    ]);
+
+    $aggregation = new SpanAggregation(
+        where: (new TraceQuery)->where(TraceCondition::nil('span.db.query.text')),
+        groupBy: 'span.db.query.text',
+        carry: ['span.db.system.name'],
+        limit: 50,
+        sort: SpanSort::Total,
+    );
+
+    $buckets = (new ClickHouseTracesSource(chClient()))->aggregateSpans(
+        $aggregation,
+        new DateTimeImmutable('@1712345000'),
+        new DateTimeImmutable('@1712346000'),
+    );
+
+    expect($buckets)->toHaveCount(2)
+        ->and($buckets[0]->key)->toBe('select * from users where id = ?')
+        ->and($buckets[0]->count)->toBe(1200)
+        ->and($buckets[0]->avgMs)->toBe(2.5)
+        ->and($buckets[0]->p95Ms)->toBe(9.0)
+        ->and($buckets[0]->maxMs)->toBe(42.0)
+        ->and($buckets[0]->totalMs)->toBe(3000.0)
+        ->and($buckets[0]->attributes['db.system.name'])->toBe('mysql');
+
+    Http::assertSent(function ($request): bool {
+        $sql = $request->body();
+
+        return str_contains($sql, 'FROM otel_traces')
+            && str_contains($sql, "SpanAttributes['db.query.text'] AS k")
+            && str_contains($sql, 'count() AS c')
+            && str_contains($sql, 'quantile(0.95)(Duration) AS p')
+            && str_contains($sql, 'sum(Duration) AS s')
+            && str_contains($sql, "any(SpanAttributes['db.system.name']) AS carry_0")
+            && str_contains($sql, "SpanAttributes['db.query.text'] != ''")
+            && str_contains($sql, 'GROUP BY k')
+            && str_contains($sql, 'ORDER BY s DESC')
+            && str_contains($sql, 'LIMIT 50');
+    });
+});
+
+it('rejects a raw TraceQL aggregation', function (): void {
+    chRespond([]);
+
+    (new ClickHouseTracesSource(chClient()))->aggregateSpans(
+        new SpanAggregation(where: TraceQuery::raw('{ span.db.system.name = "mysql" }'), groupBy: 'span.db.query.text'),
+        new DateTimeImmutable('@0'),
+        new DateTimeImmutable('@1'),
+    );
+})->throws(SourceException::class);
