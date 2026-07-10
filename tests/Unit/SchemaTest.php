@@ -8,12 +8,36 @@ use Cbox\TelemetryStore\ClickHouse\Schema;
 it('generates single-node MergeTree DDL by default', function (): void {
     $ddl = Schema::statements(30);
 
-    expect($ddl)->toHaveCount(5)
+    expect($ddl)->toHaveCount(7)
         ->and($ddl[0])->toContain('CREATE TABLE IF NOT EXISTS otel_logs (')
         ->and($ddl[0])->toContain('ENGINE = MergeTree')
         ->and($ddl[0])->not->toContain('ReplicatedMergeTree')
         ->and($ddl[0])->not->toContain('ON CLUSTER')
         ->and($ddl[0])->toContain('INTERVAL 30 DAY');
+});
+
+it('generates the db-query summary rollup and its materialized view', function (): void {
+    $ddl = implode("\n\n", Schema::statements(30));
+
+    expect($ddl)
+        ->toContain('CREATE TABLE IF NOT EXISTS otel_db_query_summary (')
+        ->toContain('ENGINE = AggregatingMergeTree')
+        ->toContain('DurationQuantile AggregateFunction(quantileTDigest, UInt64)')
+        ->toContain('ORDER BY (Bucket, DbSystem, QueryText)')
+        ->toContain('TTL Bucket + INTERVAL 30 DAY')
+        ->toContain('CREATE MATERIALIZED VIEW IF NOT EXISTS otel_db_query_summary_mv TO otel_db_query_summary')
+        ->toContain("SpanAttributes['db.query.text'] AS QueryText")
+        ->toContain('quantileTDigestState(Duration) AS DurationQuantile');
+});
+
+it('replicates the summary rollup as ReplicatedAggregatingMergeTree for HA', function (): void {
+    $engine = Engine::fromConfig(['replicated' => true, 'cluster' => 'lgtm', 'zoo_path' => '/ch/tables/{shard}/{database}/{table}']);
+    $ddl = implode("\n\n", Schema::statements(14, $engine));
+
+    expect($ddl)
+        ->toContain('CREATE TABLE IF NOT EXISTS otel_db_query_summary ON CLUSTER `lgtm` (')
+        ->toContain("ENGINE = ReplicatedAggregatingMergeTree('/ch/tables/{shard}/{database}/otel_db_query_summary', '{replica}')")
+        ->toContain('CREATE MATERIALIZED VIEW IF NOT EXISTS otel_db_query_summary_mv ON CLUSTER `lgtm`');
 });
 
 it('generates ReplicatedMergeTree ON CLUSTER DDL for HA', function (): void {

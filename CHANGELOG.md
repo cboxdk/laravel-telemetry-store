@@ -2,6 +2,24 @@
 
 All notable changes to `cboxdk/laravel-telemetry-store` are documented here.
 
+## v1.4.0
+
+### Added
+- **Query-performance rollup for scale.** A `otel_db_query_summary`
+  `AggregatingMergeTree` + materialized view keep a per-minute rollup of DB
+  query spans keyed by statement fingerprint (count / sum / max /
+  `quantileTDigest` merge states). `ClickHouseTracesSource::aggregateSpans`
+  serves the query-performance card's default DB-statement ranking from this
+  rollup instead of scanning `otel_traces`, so wide time windows stay
+  sub-second where the raw map-extraction GROUP BY was scan-bound (~50M rows/s).
+  Any aggregation with an extra filter (min-duration, service) or a different
+  grouping falls back to the exact raw scan automatically.
+  Validated on a 36-billion-row corpus: a 24h ranking dropped from ~130s (raw)
+  to a few ms (rollup). Existing deployments backfill once with
+  `INSERT INTO otel_db_query_summary SELECT toStartOfMinute(Timestamp), …
+  quantileTDigestState(Duration) FROM otel_traces WHERE SpanName='db.query' …
+  GROUP BY 1,2,3`.
+
 ## v1.3.0
 
 ### Added

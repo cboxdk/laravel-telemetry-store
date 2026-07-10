@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace Cbox\TelemetryStore\Read;
 
 use Cbox\TelemetryStore\ClickHouse\Client;
+use Cbox\TelemetryStore\ClickHouse\Schema;
 use Cbox\TelemetryUi\Connectors\SourceException;
 use Cbox\TelemetryUi\Contracts\AggregatesSpans;
 use Cbox\TelemetryUi\Contracts\TracesSource;
 use Cbox\TelemetryUi\Queries\Ir\SpanAggregation;
 use Cbox\TelemetryUi\Queries\Ir\SpanSort;
+use Cbox\TelemetryUi\Queries\Ir\TraceOp;
 use Cbox\TelemetryUi\Queries\Ir\TraceQuery;
 use Cbox\TelemetryUi\Queries\Results\MatchedSpan;
 use Cbox\TelemetryUi\Queries\Results\Span;
@@ -47,6 +49,39 @@ final readonly class ClickHouseTracesSource implements AggregatesSpans, TracesSo
             throw SourceException::because('The ClickHouse traces driver cannot aggregate a raw TraceQL query; use the structured TraceQuery API.');
         }
 
+        [$sql, $carry] = $this->summaryApplies($aggregation)
+            ? $this->summaryAggregation($aggregation, $start, $end)
+            : $this->rawAggregation($aggregation, $start, $end);
+
+        return array_map(function (array $row) use ($carry): SpanBucket {
+            $attributes = [];
+            foreach ($carry as $i => $name) {
+                $value = $row['carry_'.$i] ?? null;
+                if (is_string($value) && $value !== '') {
+                    $attributes[$name] = $value;
+                }
+            }
+
+            return new SpanBucket(
+                key: is_string($row['k'] ?? null) ? $row['k'] : '',
+                count: (int) self::float($row['c'] ?? 0),
+                avgMs: self::float($row['a'] ?? 0) / 1_000_000,
+                p95Ms: self::float($row['p'] ?? 0) / 1_000_000,
+                maxMs: self::float($row['mx'] ?? 0) / 1_000_000,
+                totalMs: self::float($row['s'] ?? 0) / 1_000_000,
+                attributes: $attributes,
+            );
+        }, $this->select($sql));
+    }
+
+    /**
+     * Exact GROUP BY over `otel_traces` — scans every matching span. Handles any
+     * grouping attribute, extra filters, and carried attributes.
+     *
+     * @return array{string, array<int, string>} the SQL and carry index→name map
+     */
+    private function rawAggregation(SpanAggregation $aggregation, DateTimeInterface $start, DateTimeInterface $end): array
+    {
         $group = TraceFields::expr($aggregation->groupBy);
 
         $where = array_merge(
@@ -73,37 +108,88 @@ final readonly class ClickHouseTracesSource implements AggregatesSpans, TracesSo
             $carry[$i] = self::attrName($field);
         }
 
-        $sortColumn = match ($aggregation->sort) {
+        $sql = 'SELECT '.implode(', ', $select)
+            .' FROM otel_traces WHERE '.implode(' AND ', $where)
+            .' GROUP BY k ORDER BY '.self::sortColumn($aggregation).' DESC LIMIT '.max(1, $aggregation->limit);
+
+        return [$sql, $carry];
+    }
+
+    /**
+     * Fast path: the query-performance ranking served from the minute rollup
+     * ({@see Schema}) — merge states re-aggregate
+     * over any window in milliseconds instead of scanning billions of spans.
+     *
+     * @return array{string, array<int, string>}
+     */
+    private function summaryAggregation(SpanAggregation $aggregation, DateTimeInterface $start, DateTimeInterface $end): array
+    {
+        $select = [
+            'QueryText AS k',
+            'sum(Calls) AS c',
+            'sum(DurationSum) / sum(Calls) AS a',
+            'quantileTDigestMerge('.self::number($aggregation->quantile).')(DurationQuantile) AS p',
+            'max(DurationMax) AS mx',
+            'sum(DurationSum) AS s',
+        ];
+
+        $carry = [];
+        if ($aggregation->carry !== []) {
+            $select[] = 'any(DbSystem) AS carry_0';
+            $carry[0] = 'db.system.name';
+        }
+
+        $sql = 'SELECT '.implode(', ', $select)
+            .' FROM otel_db_query_summary'
+            .' WHERE Bucket >= fromUnixTimestamp('.$start->getTimestamp().')'
+            .' AND Bucket <= fromUnixTimestamp('.$end->getTimestamp().')'
+            ." AND QueryText != ''"
+            .' GROUP BY k ORDER BY '.self::sortColumn($aggregation).' DESC LIMIT '.max(1, $aggregation->limit);
+
+        return [$sql, $carry];
+    }
+
+    /**
+     * Whether the minute rollup can answer this aggregation: the card's default
+     * DB-statement ranking (group by db.query.text, presence filter only,
+     * carrying at most db.system.name). Any extra filter — a min-duration
+     * threshold, a service constraint — falls back to the exact raw scan.
+     */
+    private function summaryApplies(SpanAggregation $aggregation): bool
+    {
+        if ($aggregation->groupBy !== 'span.db.query.text') {
+            return false;
+        }
+
+        foreach ($aggregation->where->conditions as $condition) {
+            $presence = $condition->field === 'span.db.query.text'
+                && $condition->op === TraceOp::Neq
+                && $condition->value === 'nil'
+                && $condition->quoted === false;
+
+            if (! $presence) {
+                return false;
+            }
+        }
+
+        foreach ($aggregation->carry as $field) {
+            if ($field !== 'span.db.system.name') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static function sortColumn(SpanAggregation $aggregation): string
+    {
+        return match ($aggregation->sort) {
             SpanSort::Avg => 'a',
             SpanSort::P95 => 'p',
             SpanSort::Max => 'mx',
             SpanSort::Calls => 'c',
             default => 's',
         };
-
-        $sql = 'SELECT '.implode(', ', $select)
-            .' FROM otel_traces WHERE '.implode(' AND ', $where)
-            .' GROUP BY k ORDER BY '.$sortColumn.' DESC LIMIT '.max(1, $aggregation->limit);
-
-        return array_map(function (array $row) use ($carry): SpanBucket {
-            $attributes = [];
-            foreach ($carry as $i => $name) {
-                $value = $row['carry_'.$i] ?? null;
-                if (is_string($value) && $value !== '') {
-                    $attributes[$name] = $value;
-                }
-            }
-
-            return new SpanBucket(
-                key: is_string($row['k'] ?? null) ? $row['k'] : '',
-                count: (int) self::float($row['c'] ?? 0),
-                avgMs: self::float($row['a'] ?? 0) / 1_000_000,
-                p95Ms: self::float($row['p'] ?? 0) / 1_000_000,
-                maxMs: self::float($row['mx'] ?? 0) / 1_000_000,
-                totalMs: self::float($row['s'] ?? 0) / 1_000_000,
-                attributes: $attributes,
-            );
-        }, $this->select($sql));
     }
 
     public function search(TraceQuery $query, DateTimeInterface $start, DateTimeInterface $end, int $limit = 20): array

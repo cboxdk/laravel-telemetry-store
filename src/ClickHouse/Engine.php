@@ -43,17 +43,28 @@ final readonly class Engine
     }
 
     /**
-     * The `ENGINE = …` clause body for a table.
+     * The `ENGINE = …` clause body for a plain MergeTree table.
      */
     public function clause(string $table): string
     {
+        return $this->clauseFor($table, 'MergeTree');
+    }
+
+    /**
+     * The `ENGINE = …` clause for any MergeTree-family engine (e.g.
+     * `AggregatingMergeTree` for summary rollups), replicated-aware: single-node
+     * returns the family verbatim, HA returns the `Replicated…` variant with the
+     * per-table Keeper path.
+     */
+    public function clauseFor(string $table, string $family): string
+    {
         if (! $this->replicated) {
-            return 'MergeTree';
+            return $family;
         }
 
         $path = str_replace('{table}', $table, $this->zooPath);
 
-        return "ReplicatedMergeTree('".$this->escape($path)."', '".$this->escape($this->replica)."')";
+        return "Replicated{$family}('".$this->escape($path)."', '".$this->escape($this->replica)."')";
     }
 
     /**

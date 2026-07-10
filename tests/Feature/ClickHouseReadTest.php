@@ -14,6 +14,7 @@ use Cbox\TelemetryUi\Queries\Ir\MetricQuery;
 use Cbox\TelemetryUi\Queries\Ir\SpanAggregation;
 use Cbox\TelemetryUi\Queries\Ir\SpanSort;
 use Cbox\TelemetryUi\Queries\Ir\TraceCondition;
+use Cbox\TelemetryUi\Queries\Ir\TraceOp;
 use Cbox\TelemetryUi\Queries\Ir\TraceQuery;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Support\Facades\Http;
@@ -95,7 +96,7 @@ it('reads a gauge metric as its latest value', function (): void {
     });
 });
 
-it('aggregates spans server-side: GROUP BY the attribute with duration stats in ms', function (): void {
+it('aggregates spans server-side via the raw scan: GROUP BY the attribute with duration stats in ms', function (): void {
     // Durations come back in nanoseconds; the driver divides by 1e6 → ms.
     chRespond([
         [
@@ -118,8 +119,13 @@ it('aggregates spans server-side: GROUP BY the attribute with duration stats in 
         ],
     ]);
 
+    // A min-duration filter on top of the presence check forces the exact raw
+    // scan (the rollup can't answer a duration threshold).
     $aggregation = new SpanAggregation(
-        where: (new TraceQuery)->where(TraceCondition::nil('span.db.query.text')),
+        where: (new TraceQuery)->where(
+            TraceCondition::nil('span.db.query.text'),
+            TraceCondition::token('duration', TraceOp::Gt, '1ms'),
+        ),
         groupBy: 'span.db.query.text',
         carry: ['span.db.system.name'],
         limit: 50,
@@ -166,3 +172,66 @@ it('rejects a raw TraceQL aggregation', function (): void {
         new DateTimeImmutable('@1'),
     );
 })->throws(SourceException::class);
+
+it('serves the default db-query ranking from the minute rollup, not a raw span scan', function (): void {
+    // Same SpanBucket shape as the raw path, but read from the summary table.
+    chRespond([[
+        'k' => 'select * from users where id = ?',
+        'c' => '1200', 'a' => 2_500_000, 'p' => 9_000_000, 'mx' => 42_000_000, 's' => 3_000_000_000,
+        'carry_0' => 'mysql',
+    ]]);
+
+    $aggregation = new SpanAggregation(
+        where: (new TraceQuery)->where(TraceCondition::nil('span.db.query.text')),
+        groupBy: 'span.db.query.text',
+        carry: ['span.db.system.name'],
+        sort: SpanSort::Total,
+    );
+
+    $buckets = (new ClickHouseTracesSource(chClient()))->aggregateSpans(
+        $aggregation, new DateTimeImmutable('@1712345000'), new DateTimeImmutable('@1712346000'),
+    );
+
+    expect($buckets)->toHaveCount(1)
+        ->and($buckets[0]->totalMs)->toBe(3000.0)
+        ->and($buckets[0]->avgMs)->toBe(2.5)
+        ->and($buckets[0]->attributes['db.system.name'])->toBe('mysql');
+
+    Http::assertSent(function ($request): bool {
+        $sql = $request->body();
+
+        return str_contains($sql, 'FROM otel_db_query_summary')
+            && str_contains($sql, 'sum(DurationSum) AS s')
+            && str_contains($sql, 'quantileTDigestMerge(0.95)(DurationQuantile) AS p')
+            && str_contains($sql, 'any(DbSystem) AS carry_0')
+            && str_contains($sql, 'ORDER BY s DESC')
+            && ! str_contains($sql, 'otel_traces');
+    });
+});
+
+it('falls back to the exact raw span scan when the aggregation carries an extra filter', function (): void {
+    chRespond([]);
+
+    // A min-duration threshold on top of the presence check: the rollup cannot
+    // answer it (durations were pre-aggregated), so it must scan otel_traces.
+    $aggregation = new SpanAggregation(
+        where: (new TraceQuery)->where(
+            TraceCondition::nil('span.db.query.text'),
+            TraceCondition::token('duration', TraceOp::Gt, '50ms'),
+        ),
+        groupBy: 'span.db.query.text',
+        carry: ['span.db.system.name'],
+    );
+
+    (new ClickHouseTracesSource(chClient()))->aggregateSpans(
+        $aggregation, new DateTimeImmutable('@0'), new DateTimeImmutable('@1'),
+    );
+
+    Http::assertSent(function ($request): bool {
+        $sql = $request->body();
+
+        return str_contains($sql, 'FROM otel_traces')
+            && str_contains($sql, 'Duration > 50000000')
+            && ! str_contains($sql, 'otel_db_query_summary');
+    });
+});

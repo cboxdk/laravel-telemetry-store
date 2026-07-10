@@ -35,6 +35,12 @@ final class Schema
             self::metricsSum($ttl, $engine),
             self::metricsGauge($ttl, $engine),
             self::metricsHistogram($ttl, $engine),
+            // Rollup for the query-performance dashboard: a summary + a
+            // materialized view keeping it current, so ranking DB statements
+            // stays sub-second at billions of spans (raw GROUP BY on the
+            // SpanAttributes map is scan-bound). Created after otel_traces.
+            self::dbQuerySummary($retentionDays, $engine),
+            self::dbQuerySummaryMv($engine),
         ];
     }
 
@@ -124,6 +130,54 @@ final class Schema
             'ORDER BY (MetricName, ServiceName, toDateTime(Timestamp))',
             $ttl,
         );
+    }
+
+    /**
+     * Per-minute rollup of DB query spans, keyed by statement fingerprint, that
+     * the query-performance card reads instead of scanning `otel_traces`. Merge
+     * states keep count/sum/max/quantile exact and re-aggregatable across any
+     * time window. Populated by {@see dbQuerySummaryMv()} on new inserts and a
+     * one-time backfill for existing data.
+     */
+    private static function dbQuerySummary(int $retentionDays, Engine $engine): string
+    {
+        $columns = <<<'COLS'
+                Bucket DateTime CODEC(Delta(4), ZSTD(1)),
+                QueryText String CODEC(ZSTD(1)),
+                DbSystem LowCardinality(String) CODEC(ZSTD(1)),
+                Calls SimpleAggregateFunction(sum, UInt64),
+                DurationSum SimpleAggregateFunction(sum, UInt64),
+                DurationMax SimpleAggregateFunction(max, UInt64),
+                DurationQuantile AggregateFunction(quantileTDigest, UInt64)
+            COLS;
+
+        return "CREATE TABLE IF NOT EXISTS otel_db_query_summary{$engine->onCluster()} (\n"
+            .$columns."\n"
+            .') ENGINE = '.$engine->clauseFor('otel_db_query_summary', 'AggregatingMergeTree')."\n"
+            ."PARTITION BY toDate(Bucket)\n"
+            ."ORDER BY (Bucket, DbSystem, QueryText)\n"
+            ."TTL Bucket + INTERVAL {$retentionDays} DAY\n"
+            .'SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1';
+    }
+
+    /**
+     * Materialized view feeding {@see dbQuerySummary()} from every `otel_traces`
+     * insert — the minute rollup stays current without a batch job.
+     */
+    private static function dbQuerySummaryMv(Engine $engine): string
+    {
+        return "CREATE MATERIALIZED VIEW IF NOT EXISTS otel_db_query_summary_mv{$engine->onCluster()} TO otel_db_query_summary AS
+            SELECT
+                toStartOfMinute(Timestamp) AS Bucket,
+                SpanAttributes['db.query.text'] AS QueryText,
+                SpanAttributes['db.system.name'] AS DbSystem,
+                count() AS Calls,
+                sum(Duration) AS DurationSum,
+                max(Duration) AS DurationMax,
+                quantileTDigestState(Duration) AS DurationQuantile
+            FROM otel_traces
+            WHERE SpanName = 'db.query' AND SpanAttributes['db.query.text'] != ''
+            GROUP BY Bucket, QueryText, DbSystem";
     }
 
     /**
