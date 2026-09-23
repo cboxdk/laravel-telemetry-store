@@ -12,8 +12,8 @@ It does two things:
    app.
 2. **Read** — a ClickHouse-backed driver for
    [`cboxdk/laravel-telemetry-ui`](https://github.com/cboxdk/laravel-telemetry-ui),
-   registered as an additional connection driver. Every existing dashboard card
-   runs against ClickHouse unchanged, because the UI's query layer is a
+   registered as an additional connection driver (telemetry-ui 1.x and 2.x).
+   Every dashboard panel runs against ClickHouse unchanged, because the UI's query layer is a
    backend-neutral IR (`LogQuery` / `TraceQuery` / `MetricQuery`) that each
    driver compiles to its own dialect — LogQL/TraceQL/PromQL for the LGTM stack,
    SQL here.

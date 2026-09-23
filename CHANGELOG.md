@@ -2,6 +2,17 @@
 
 All notable changes to `cboxdk/laravel-telemetry-store` are documented here.
 
+## v1.4.1
+
+### Changed
+- Supports `cboxdk/laravel-telemetry-ui` 2.x alongside 1.x
+  (`^1.0 || ^2.0`). The read drivers are unchanged: 2.0 kept the contracts,
+  query IR and result DTOs they implement.
+- The end-to-end suite fetches the real dashboard panels from telemetry-ui's
+  v2 JSON API instead of rendering Livewire cards, and runs in its own
+  `telemetry_e2e` database — it truncates its tables, so it no longer touches
+  a `telemetry` database a dev box may be using for real data.
+
 ## v1.4.0
 
 ### Added
