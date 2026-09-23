@@ -183,10 +183,19 @@ final readonly class ClickHouseMetricsSource implements MetricsSource
 
     private function bucketValueExpr(MetricQuery $query, int $step): string
     {
+        // A histogram's _count/_sum live in their own columns; everything
+        // else is a Value.
+        $column = match (MetricName::histogramPart($query->name)) {
+            'count' => 'toFloat64(Count)',
+            'sum' => 'Sum',
+            default => 'Value',
+        };
+        $delta = 'greatest(max('.$column.') - min('.$column.'), 0)';
+
         return match ($query->fn) {
-            MetricFn::Rate => '(greatest(max(Value) - min(Value), 0)) / '.$step,
-            MetricFn::Increase, MetricFn::CounterIncrease => 'greatest(max(Value) - min(Value), 0)',
-            MetricFn::None => 'avg(Value)',
+            MetricFn::Rate => '('.$delta.') / '.$step,
+            MetricFn::Increase, MetricFn::CounterIncrease => $delta,
+            MetricFn::None => 'avg('.$column.')',
         };
     }
 

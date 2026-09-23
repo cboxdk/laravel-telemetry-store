@@ -63,15 +63,16 @@ beforeEach(function (): void {
         ]],
     ]));
 
-    // Request-duration histogram, two cumulative points (count 0 → 12) so the
-    // per-period increase is a clean 12.
+    // Request-duration histogram in seconds, as laravel-telemetry 2.x emits
+    // it, two cumulative points (count 0 → 12) so the per-period increase is a
+    // clean 12.
     $writer->writeMetrics($parser->metrics([
         'resourceMetrics' => [[
             'resource' => ['attributes' => [['key' => 'service.name', 'value' => ['stringValue' => 'demo']]]],
             'scopeMetrics' => [['metrics' => [
-                ['name' => 'http.server.request.duration', 'unit' => 'ms', 'histogram' => ['dataPoints' => [
-                    ['timeUnixNano' => $ns(600), 'count' => '0', 'sum' => 0.0, 'bucketCounts' => ['0', '0'], 'explicitBounds' => [100.0], 'attributes' => [['key' => 'http.response.status_code', 'value' => ['stringValue' => '200']]]],
-                    ['timeUnixNano' => $ns(10), 'count' => '12', 'sum' => 240.0, 'bucketCounts' => ['12', '0'], 'explicitBounds' => [100.0], 'attributes' => [['key' => 'http.response.status_code', 'value' => ['stringValue' => '200']]]],
+                ['name' => 'http.server.request.duration', 'unit' => 's', 'histogram' => ['dataPoints' => [
+                    ['timeUnixNano' => $ns(600), 'count' => '0', 'sum' => 0.0, 'bucketCounts' => ['0', '0'], 'explicitBounds' => [0.1], 'attributes' => [['key' => 'http.response.status_code', 'value' => ['stringValue' => '200']]]],
+                    ['timeUnixNano' => $ns(10), 'count' => '12', 'sum' => 0.24, 'bucketCounts' => ['12', '0'], 'explicitBounds' => [0.1], 'attributes' => [['key' => 'http.response.status_code', 'value' => ['stringValue' => '200']]]],
                 ]]],
             ]]],
         ]],
@@ -98,11 +99,14 @@ it('serves the unified-errors panel grouped from ClickHouse exception records', 
         ->assertSee('E2ECanaryException');
 });
 
-it('serves the requests-activity metrics panel against ClickHouse without a driver error', function (): void {
-    panel('requests-activity')
+it('serves the requests-activity metrics panel with the seeded request count', function (): void {
+    $stats = panel('requests-activity')
         ->assertOk()
         ->assertJsonPath('error', null)
-        ->assertSee('Requests');
+        ->json('stats');
+
+    expect($stats[0]['label'])->toBe('Requests')
+        ->and($stats[0]['value'])->toBe('12');
 });
 
 /**
