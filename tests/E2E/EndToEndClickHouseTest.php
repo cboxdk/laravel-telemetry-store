@@ -87,21 +87,21 @@ function panel(string $id): TestResponse
 it('serves the log-viewer panel with lines from ClickHouse', function (): void {
     panel('log-viewer')
         ->assertOk()
-        ->assertJsonMissingPath('error')
+        ->assertJsonPath('error', null)
         ->assertSee('e2e-canary-9f3a');
 });
 
 it('serves the unified-errors panel grouped from ClickHouse exception records', function (): void {
     panel('unified-errors')
         ->assertOk()
-        ->assertJsonMissingPath('error')
+        ->assertJsonPath('error', null)
         ->assertSee('E2ECanaryException');
 });
 
 it('serves the requests-activity metrics panel against ClickHouse without a driver error', function (): void {
     panel('requests-activity')
         ->assertOk()
-        ->assertJsonMissingPath('error')
+        ->assertJsonPath('error', null)
         ->assertSee('Requests');
 });
 
@@ -186,7 +186,7 @@ it('serves the query-performance panel using the exact aggregation from ClickHou
 
     panel('query-performance')
         ->assertOk()
-        ->assertJsonMissingPath('error')
+        ->assertJsonPath('error', null)
         ->assertSee('select * from users where id = ?', false)
         ->assertSee('select * from orders where user_id = ?', false);
 });
