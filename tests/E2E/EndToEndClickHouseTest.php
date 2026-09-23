@@ -8,32 +8,34 @@ use Cbox\TelemetryStore\Ingest\ClickHouseWriter;
 use Cbox\TelemetryStore\Ingest\OtlpParser;
 use Cbox\TelemetryStore\Read\ClickHouseTracesSource;
 use Cbox\TelemetryStore\Tests\E2ETestCase;
-use Cbox\TelemetryUi\Cards\Builtin\LogViewer;
-use Cbox\TelemetryUi\Cards\Builtin\QueryPerformance;
-use Cbox\TelemetryUi\Cards\Builtin\RequestsActivity;
-use Cbox\TelemetryUi\Cards\Builtin\UnifiedErrors;
 use Cbox\TelemetryUi\Contracts\AggregatesSpans;
+use Cbox\TelemetryUi\Panels\Panel;
 use Cbox\TelemetryUi\Queries\Ir\SpanAggregation;
 use Cbox\TelemetryUi\Queries\Ir\SpanSort;
 use Cbox\TelemetryUi\Queries\Ir\TraceCondition;
 use Cbox\TelemetryUi\Queries\Ir\TraceQuery;
 use Illuminate\Http\Client\Factory as HttpFactory;
-use Livewire\Livewire;
+use Illuminate\Testing\TestResponse;
 
 uses(E2ETestCase::class);
 
 /**
- * These render the ACTUAL dashboard cards through Livewire against a live
- * ClickHouse — the full card → query IR → clickhouse-* driver → SQL → HTML
- * chain. Skipped when ClickHouse isn't reachable on :18123.
+ * These fetch the ACTUAL dashboard panels from telemetry-ui's JSON API against
+ * a live ClickHouse — the full panel → query IR → clickhouse-* driver → SQL →
+ * payload chain. Skipped when ClickHouse isn't reachable on :18123, or on a
+ * telemetry-ui 1.x install (its cards were Livewire components).
  */
 beforeEach(function (): void {
     if (! E2ETestCase::clickhouseReachable()) {
         $this->markTestSkipped('ClickHouse not reachable on '.E2ETestCase::CLICKHOUSE);
     }
 
-    $ch = new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, 'telemetry', settings: ['wait_for_async_insert' => 1]);
-    (new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, 'default'))->execute('CREATE DATABASE IF NOT EXISTS telemetry');
+    if (! class_exists(Panel::class)) {
+        $this->markTestSkipped('The end-to-end panels need telemetry-ui 2.x.');
+    }
+
+    $ch = new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, E2ETestCase::DATABASE, settings: ['wait_for_async_insert' => 1]);
+    (new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, 'default'))->execute('CREATE DATABASE IF NOT EXISTS '.E2ETestCase::DATABASE);
 
     foreach (Schema::statements(30) as $ddl) {
         $ch->execute($ddl);
@@ -61,40 +63,50 @@ beforeEach(function (): void {
         ]],
     ]));
 
-    // Request-duration histogram, two cumulative points (count 0 → 12) so the
-    // per-period increase is a clean 12.
+    // Request-duration histogram in seconds, as laravel-telemetry 2.x emits
+    // it, two cumulative points (count 0 → 12) so the per-period increase is a
+    // clean 12.
     $writer->writeMetrics($parser->metrics([
         'resourceMetrics' => [[
             'resource' => ['attributes' => [['key' => 'service.name', 'value' => ['stringValue' => 'demo']]]],
             'scopeMetrics' => [['metrics' => [
-                ['name' => 'http.server.request.duration', 'unit' => 'ms', 'histogram' => ['dataPoints' => [
-                    ['timeUnixNano' => $ns(600), 'count' => '0', 'sum' => 0.0, 'bucketCounts' => ['0', '0'], 'explicitBounds' => [100.0], 'attributes' => [['key' => 'http.response.status_code', 'value' => ['stringValue' => '200']]]],
-                    ['timeUnixNano' => $ns(10), 'count' => '12', 'sum' => 240.0, 'bucketCounts' => ['12', '0'], 'explicitBounds' => [100.0], 'attributes' => [['key' => 'http.response.status_code', 'value' => ['stringValue' => '200']]]],
+                ['name' => 'http.server.request.duration', 'unit' => 's', 'histogram' => ['dataPoints' => [
+                    ['timeUnixNano' => $ns(600), 'count' => '0', 'sum' => 0.0, 'bucketCounts' => ['0', '0'], 'explicitBounds' => [0.1], 'attributes' => [['key' => 'http.response.status_code', 'value' => ['stringValue' => '200']]]],
+                    ['timeUnixNano' => $ns(10), 'count' => '12', 'sum' => 0.24, 'bucketCounts' => ['12', '0'], 'explicitBounds' => [0.1], 'attributes' => [['key' => 'http.response.status_code', 'value' => ['stringValue' => '200']]]],
                 ]]],
             ]]],
         ]],
     ]));
 });
 
-it('renders the LogViewer card with lines from ClickHouse', function (): void {
-    Livewire::test(LogViewer::class)
+/** One dashboard panel's payload, as the SPA fetches it. */
+function panel(string $id): TestResponse
+{
+    return test()->getJson('/telemetry-ui/api/v2/panels/'.$id.'?period=1h');
+}
+
+it('serves the log-viewer panel with lines from ClickHouse', function (): void {
+    panel('log-viewer')
         ->assertOk()
+        ->assertJsonPath('error', null)
         ->assertSee('e2e-canary-9f3a');
 });
 
-it('renders the UnifiedErrors card grouped from ClickHouse exception records', function (): void {
-    Livewire::test(UnifiedErrors::class)
+it('serves the unified-errors panel grouped from ClickHouse exception records', function (): void {
+    panel('unified-errors')
         ->assertOk()
+        ->assertJsonPath('error', null)
         ->assertSee('E2ECanaryException');
 });
 
-it('renders the RequestsActivity metrics card against ClickHouse without a driver error', function (): void {
-    Livewire::test(RequestsActivity::class)
+it('serves the requests-activity metrics panel with the seeded request count', function (): void {
+    $stats = panel('requests-activity')
         ->assertOk()
-        ->assertSee('Requests')
-        ->assertDontSee('Unexpected response')
-        ->assertDontSee('Could not reach')
-        ->assertDontSee('store query failed');
+        ->assertJsonPath('error', null)
+        ->json('stats');
+
+    expect($stats[0]['label'])->toBe('Requests')
+        ->and($stats[0]['value'])->toBe('12');
 });
 
 /**
@@ -144,7 +156,7 @@ function seedDbSpans(Client $ch): void
 }
 
 it('aggregates spans exactly against live ClickHouse: total-time ranking, carried system, ns→ms', function (): void {
-    $ch = new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, 'telemetry', settings: ['wait_for_async_insert' => 1]);
+    $ch = new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, E2ETestCase::DATABASE, settings: ['wait_for_async_insert' => 1]);
     seedDbSpans($ch);
 
     $source = new ClickHouseTracesSource($ch);
@@ -173,13 +185,12 @@ it('aggregates spans exactly against live ClickHouse: total-time ranking, carrie
         ->and($buckets[1]->totalMs)->toBe(6.0);
 });
 
-it('renders the QueryPerformance card using the exact aggregation from ClickHouse', function (): void {
-    seedDbSpans(new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, 'telemetry', settings: ['wait_for_async_insert' => 1]));
+it('serves the query-performance panel using the exact aggregation from ClickHouse', function (): void {
+    seedDbSpans(new Client(new HttpFactory, E2ETestCase::CLICKHOUSE, E2ETestCase::DATABASE, settings: ['wait_for_async_insert' => 1]));
 
-    Livewire::test(QueryPerformance::class)
+    panel('query-performance')
         ->assertOk()
-        ->assertSee('select * from users where id = ?')
-        ->assertSee('select * from orders where user_id = ?')
-        ->assertDontSee('store query failed')
-        ->assertDontSee('Could not reach');
+        ->assertJsonPath('error', null)
+        ->assertSee('select * from users where id = ?', false)
+        ->assertSee('select * from orders where user_id = ?', false);
 });

@@ -235,3 +235,24 @@ it('falls back to the exact raw span scan when the aggregation carries an extra 
             && ! str_contains($sql, 'otel_db_query_summary');
     });
 });
+
+it('charts a histogram count as a rate from its Count column, not Value', function (): void {
+    chRespond([['t' => 1735689600, 'http_response_status_code' => '200', 'v' => 12]]);
+
+    $series = (new ClickHouseMetricsSource(chClient()))->queryRange(
+        (new MetricQuery('http_server_request_duration_seconds_count'))->rate('1m')->sumBy('http_response_status_code')->times(60),
+        new DateTimeImmutable('@1735689000'),
+        new DateTimeImmutable('@1735689600'),
+    );
+
+    expect($series)->toHaveCount(1)
+        ->and($series[0]->labels)->toBe(['http_response_status_code' => '200']);
+
+    Http::assertSent(function ($request): bool {
+        $sql = $request->body();
+
+        return str_contains($sql, 'FROM otel_metrics_histogram')
+            && str_contains($sql, 'max(toFloat64(Count))')
+            && ! str_contains($sql, 'max(Value)');
+    });
+});

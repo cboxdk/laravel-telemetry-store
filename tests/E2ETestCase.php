@@ -7,37 +7,38 @@ namespace Cbox\TelemetryStore\Tests;
 use Cbox\TelemetryStore\TelemetryStoreServiceProvider;
 use Cbox\TelemetryUi\TelemetryUiServiceProvider;
 use Illuminate\Support\Facades\Gate;
-use Livewire\Livewire;
-use Livewire\LivewireServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
 
 /**
  * Boots a real Laravel app with the telemetry-ui dashboard AND this store, its
- * three connections pointed at a live ClickHouse — so a test can render an
- * actual dashboard card through Livewire and prove the whole card → IR → driver
- * → ClickHouse → HTML chain end to end. Integration only; tests gate themselves
- * on ClickHouse being reachable.
+ * three connections pointed at a live ClickHouse — so a test can fetch an
+ * actual dashboard panel from the JSON API and prove the whole panel → IR →
+ * driver → ClickHouse → payload chain end to end. Integration only; tests gate
+ * themselves on ClickHouse being reachable.
+ *
+ * The suite truncates its tables, so it uses a database of its own — never
+ * `telemetry`, which on a dev box may hold a corpus someone is testing with.
  */
 abstract class E2ETestCase extends Orchestra
 {
     public const CLICKHOUSE = 'http://localhost:18123';
 
+    public const DATABASE = 'telemetry_e2e';
+
     protected function setUp(): void
     {
         parent::setUp();
 
-        // Cards stream in lazily in the browser; render them eagerly in tests.
-        Livewire::withoutLazyLoading();
-
         // Open the dashboard gate so routes/links resolve during rendering.
-        Gate::define('viewTelemetryUi', static fn (): bool => true);
-        Gate::define('manageTelemetryUi', static fn (): bool => true);
+        // Nullable user: Laravel only calls a gate for a guest when it says it
+        // accepts one. v2 passes the page as the second argument.
+        Gate::define('viewTelemetryUi', static fn (?object $user = null, ?string $page = null): bool => true);
+        Gate::define('manageTelemetryUi', static fn (?object $user = null): bool => true);
     }
 
     protected function getPackageProviders($app): array
     {
         return [
-            LivewireServiceProvider::class,
             TelemetryUiServiceProvider::class,
             TelemetryStoreServiceProvider::class,
         ];
@@ -51,13 +52,13 @@ abstract class E2ETestCase extends Orchestra
         $config->set('cache.default', 'array');
         $config->set('telemetry-ui.cache.ttl', 0);
 
-        $ch = ['url' => self::CLICKHOUSE, 'database' => 'telemetry'];
+        $ch = ['url' => self::CLICKHOUSE, 'database' => self::DATABASE];
         $config->set('telemetry-ui.connections.logs', ['driver' => 'clickhouse-logs'] + $ch);
         $config->set('telemetry-ui.connections.traces', ['driver' => 'clickhouse-traces'] + $ch);
         $config->set('telemetry-ui.connections.metrics', ['driver' => 'clickhouse-metrics'] + $ch);
 
         $config->set('telemetry-store.clickhouse.endpoint', self::CLICKHOUSE);
-        $config->set('telemetry-store.clickhouse.database', 'telemetry');
+        $config->set('telemetry-store.clickhouse.database', self::DATABASE);
         $config->set('telemetry-store.ingest.enabled', false);
     }
 
