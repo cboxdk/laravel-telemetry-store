@@ -13,6 +13,13 @@ All notable changes to `cboxdk/laravel-telemetry-store` are documented here.
   `telemetry_e2e` database — it truncates its tables, so it no longer touches
   a `telemetry` database a dev box may be using for real data.
 
+### Fixed
+- A range query over a histogram's `_count` or `_sum` (the requests-per-minute
+  chart, `http_server_request_duration_seconds_count`) read a `Value` column
+  the histogram table doesn't have, so the chart failed with a driver error.
+  It now reads `Count` / `Sum`, as the instant query already did. The old E2E
+  test missed it by asserting on the wrong error text.
+
 ## v1.4.0
 
 ### Added
