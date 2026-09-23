@@ -30,8 +30,10 @@ abstract class E2ETestCase extends Orchestra
         parent::setUp();
 
         // Open the dashboard gate so routes/links resolve during rendering.
-        Gate::define('viewTelemetryUi', static fn (): bool => true);
-        Gate::define('manageTelemetryUi', static fn (): bool => true);
+        // Nullable user: Laravel only calls a gate for a guest when it says it
+        // accepts one. v2 passes the page as the second argument.
+        Gate::define('viewTelemetryUi', static fn (?object $user = null, ?string $page = null): bool => true);
+        Gate::define('manageTelemetryUi', static fn (?object $user = null): bool => true);
     }
 
     protected function getPackageProviders($app): array
